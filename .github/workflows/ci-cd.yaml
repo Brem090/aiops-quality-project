@@ -20,10 +20,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -40,10 +40,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.retrain == 'true' || contains(github.event.head_commit.message, '[retrain]')
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -59,7 +59,7 @@ jobs:
           cd ..
       
       - name: Upload model artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: trained-model
           path: models/model.pkl
@@ -69,11 +69,11 @@ jobs:
     needs: [test, retrain-model]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/final-project'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Download model (if retrained)
         if: needs.retrain-model.result == 'success'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: trained-model
           path: models/
