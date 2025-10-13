@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: ml-inference-service
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+
+resources:
+  limits:
+    cpu: 300m
+    memory: 384Mi
+  requests:
+    cpu: 150m
+    memory: 192Mi
+
+env:
+  - name: MODEL_PATH
+    value: "/app/models/model.pkl"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: DRIFT_BACKEND
+    value: "alibi"
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  path: /metrics
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 5
