@@ -81,7 +81,6 @@ jobs:
       - name: Build Docker image
         run: |
           cp models/model.pkl app/
-          cd app
           docker build -t ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} .
           docker tag ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} ${{ env.DOCKER_IMAGE }}:latest
       
