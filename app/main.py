@@ -74,9 +74,8 @@ def load_model():
     """Завантаження моделі при старті"""
     global model, feature_stats, alibi_detector, drift_backend
 
-    default_model_path = os.path.join(os.path.dirname(__file__), "../models/model.pkl")
-    model_path = os.getenv("MODEL_PATH", default_model_path)
-    model_path = os.path.abspath(model_path)  # нормалізує шлях
+    model_path = os.getenv("MODEL_PATH", "/models/model.pkl")
+    model_path = os.path.abspath(model_path)
 
     try:
         with open(model_path, "rb") as f:
