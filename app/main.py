@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pickle
+from pathlib import Path
 import numpy as np
 from prometheus_client import Counter, Histogram, generate_latest
 from fastapi.responses import Response
@@ -42,10 +43,11 @@ class PredictionResponse(BaseModel):
     timestamp: str
 
 def load_model():
-    """Завантаження моделі при старті"""
     global model, feature_stats
     
-    model_path = os.getenv("MODEL_PATH", "/app/models/model.pkl")
+    base_dir = Path(__file__).resolve().parent
+    default_path = base_dir / "models" / "model.pkl"
+    model_path = Path(os.getenv("MODEL_PATH", str(default_path)))
     
     try:
         with open(model_path, "rb") as f:

@@ -214,14 +214,16 @@ kubectl port-forward svc/argocd-server -n argocd 8080:443
 ```bash
 # Додаємо Helm репозиторії
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
 # Встановлюємо kube-prometheus-stack
-helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack `
+helm install monitoring prometheus-community/kube-prometheus-stack `
   --namespace monitoring `
   --create-namespace `
-  --set prometheus-node-exporter.hostRootFsMount.enabled=false `
-  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+  --wait `
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false `
+  --set nodeExporter.enabled=false
 
 # Чекаємо на готовність
 kubectl wait --for=condition=Ready pods --all -n monitoring --timeout=300s
@@ -230,14 +232,11 @@ kubectl wait --for=condition=Ready pods --all -n monitoring --timeout=300s
 ### Крок 7: Встановлення Loki Stack
 
 ```bash
-# Додаємо Grafana Helm repo
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
-
 # Встановлюємо Loki Stack
 helm install loki grafana/loki-stack `
   --namespace monitoring `
-  --create-namespace `
+  --wait `
+  --set grafana.enabled=false `
   --set promtail.enabled=true `
   --set loki.persistence.enabled=true `
   --set loki.persistence.size=2Gi
@@ -250,12 +249,13 @@ kubectl get pods -n monitoring
 
 ## 🚀 Запуск проєкту
 
-### Метод 1: Через Helm (мануальний деплой)
-
 ```bash
 # Створюємо namespace для сервісу
 kubectl create namespace ml-service
+```
+### Метод 1: Через Helm (мануальний деплой)
 
+```bash
 # Встановлюємо через Helm
 helm install ml-service ./helm --namespace ml-service
 
@@ -269,6 +269,9 @@ kubectl get svc -n ml-service
 ```bash
 # Оновіть argocd/application.yaml з вашим GitHub репозиторієм
 # Замініть YOUR_USERNAME на ваш GitHub username
+
+# Перейдіть у кореневу директорію проєкту
+cd aiops-quality-project
 
 # Застосовуємо Application
 kubectl apply -f argocd/application.yaml -n argocd
@@ -290,7 +293,7 @@ kubectl get pods -n ml-service
 
 # Очікуваний результат:
 # NAME                                    READY   STATUS    RESTARTS   AGE
-# ml-service-ml-inference-service-xxx     1/1     Running   0          2m
+# ml-inference-service-xxxx...     1/1     Running   0          2m
 
 # Переглянути логи
 kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service -f
@@ -303,10 +306,10 @@ kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service -f
 ### 1. Port-forward до сервісу
 
 ```bash
-kubectl port-forward -n ml-service svc/ml-service-ml-inference-service 8000:8000
+kubectl port-forward -n ml-service svc/ml-inference-service 8000:8000
 ```
 
-### 2. Перевірка health endpoint
+### 2. Перевірка health endpoint (в іншому терміналі)
 
 ```bash
 curl http://localhost:8000/health
@@ -325,22 +328,26 @@ curl http://localhost:8000/health
 #### Через curl:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "features": [0.5, -0.3, 1.2, 0.8, -0.5, 0.2, 0.9, -0.1, 
-                 0.4, 0.7, -0.6, 0.3, 0.1, -0.4, 0.6, 0.2, 
-                 -0.8, 0.5, 0.9, -0.2]
-  }'
+$body = @{
+    features = @(0.5, -0.3, 1.2, 0.8, -0.5, 0.2, 0.9, -0.1,
+                 0.4, 0.7, -0.6, 0.3, 0.1, -0.4, 0.6, 0.2,
+                 -0.8, 0.5, 0.9, -0.2)
+} | ConvertTo-Json
+
+Invoke-WebRequest -Uri "http://localhost:8000/predict" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body | Select-Object -ExpandProperty Content
+
 ```
 
 **Очікувана відповідь**:
 ```json
 {
   "prediction": 1,
-  "probability": 0.8234,
+  "probability": 0.6534023807361028,
   "drift_detected": false,
-  "timestamp": "2025-10-12T14:30:45.123456"
+  "timestamp": "2025-10-14T10:20:53.864439"
 }
 ```
 
@@ -358,7 +365,7 @@ python tests/test_drift.py
 ### 4. Перевірка метрик
 
 ```bash
-curl http://localhost:8000/metrics
+curl http://localhost:8000/metrics -UseBasicParsing | Select-Object -ExpandProperty Content
 ```
 
 Шукайте метрики:
@@ -376,12 +383,14 @@ curl http://localhost:8000/metrics
 
 ```bash
 # Отримуємо пароль admin
-kubectl get secret --namespace monitoring monitoring-grafana \
-  -o jsonpath="{.data.admin-password}" | base64 -d
-echo
+[System.Text.Encoding]::UTF8.GetString(
+    [System.Convert]::FromBase64String(
+        (kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}")
+    )
+)
 
 # Port-forward
-kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
 ```
 
 **Відкрийте**: http://localhost:3000
@@ -392,8 +401,7 @@ kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
 
 1. У Grafana UI: **Dashboards → Import**
 2. Upload `grafana/dashboard.json`
-3. Виберіть Prometheus data source
-4. Натисніть **Import**
+3. Натисніть **Import**
 
 #### Панелі Dashboard:
 
@@ -409,12 +417,12 @@ kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
 
 ```bash
 # Port-forward до Prometheus
-kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090
 ```
 
 **Відкрийте**: http://localhost:9090
 
-Корисні PromQL запити:
+Корисні PromQL запити (Graph):
 ```promql
 # Кількість передбачень за останню хвилину
 rate(predictions_total[1m])

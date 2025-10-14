@@ -8,6 +8,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+import pathlib
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -52,9 +53,11 @@ def train_model():
             random_state=rng.integers(0, 9999)
         ),
         "LogisticRegression": LogisticRegression(
-            max_iter=500,
-            C=rng.uniform(0.5, 3.0),
-            solver="lbfgs"
+            max_iter=1000,
+            C=1.0,
+            solver="saga",
+            n_jobs=-1,
+            random_state=rng.integers(0, 9999)
         ),
         "NeuralNetwork": MLPClassifier(
             hidden_layer_sizes=(rng.integers(8, 32), rng.integers(8, 32)),
@@ -76,9 +79,11 @@ def train_model():
     print(f"[{datetime.now()}] Точність моделі: {accuracy:.4f}")
     print(f"[{datetime.now()}] Параметри: {n_features} фіч, {n_samples} зразків")
 
-    os.makedirs("../models", exist_ok=True)
-    model_path = "models/model.pkl"
-    metadata_path = "models/metadata.pkl"
+    base_dir = pathlib.Path(__file__).resolve().parent.parent / "models"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = base_dir / "model.pkl"
+    metadata_path = base_dir / "metadata.pkl"
 
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
