@@ -245,18 +245,20 @@ helm install loki grafana/loki-stack `
   --set loki.persistence.size=1Gi `
   --set loki.auth_enabled=false `
 
-  3. (Опційно) Під’єднати Prometheus до нової Grafana
+  3. Під’єднати Prometheus до Grafana (обов’язково для метрик дашборду)
 
-Відкрий Grafana → Connections → Data sources → Add data source
+Відкрий **Grafana → Connections → Data sources → Add data source**
 
-Обери Prometheus
+Обери **Prometheus**
 
-У полі URL введи:
+У полі **URL** введи:
 
 http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 
 
 Натисни Save & test — має показати Data source is working.
+ℹ️ Без цього підключення метрики у Grafana Dashboard залишаться порожніми,
+адже Grafana з Loki Stack за замовчуванням має лише джерело даних Loki.
 
 # Перевіряємо чи усе добре
 kubectl get pods -n monitoring
@@ -405,12 +407,12 @@ curl http://localhost:8000/metrics -UseBasicParsing | Select-Object -ExpandPrope
 # Отримуємо пароль admin
 [System.Text.Encoding]::UTF8.GetString(
     [System.Convert]::FromBase64String(
-        (kubectl get secret -n monitoring monitoring-grafana -o jsonpath="{.data.admin-password}")
+        (kubectl get secret -n monitoring loki-grafana -o jsonpath="{.data.admin-password}")
     )
 )
 
 # Port-forward (окреме вікно)
-kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+kubectl port-forward -n monitoring svc/loki-grafana 3000:80
 ```
 
 **Відкрийте**: http://localhost:3000

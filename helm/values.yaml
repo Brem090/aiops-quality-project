@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: ml-inference-service
+  repository: ghcr.io/Brem090/aiops-quality-project/ml-inference-service
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: "latest"  # буде автоматично оновлюватися GitHub Actions
 
 service:
   type: ClusterIP
@@ -24,7 +24,7 @@ env:
   - name: LOG_LEVEL
     value: "INFO"
   - name: DRIFT_BACKEND
-    value: "tabular" 
+    value: "tabular"
   - name: GITHUB_REPO
     value: "Brem090/aiops-quality-project"
 

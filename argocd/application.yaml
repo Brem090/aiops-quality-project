@@ -5,19 +5,16 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  
   source:
     repoURL: https://github.com/Brem090/aiops-quality-project
-    targetRevision: HEAD
+    targetRevision: final-project
     path: helm
     helm:
       valueFiles:
         - values.yaml
-  
   destination:
     server: https://kubernetes.default.svc
     namespace: ml-service
-  
   syncPolicy:
     automated:
       prune: true

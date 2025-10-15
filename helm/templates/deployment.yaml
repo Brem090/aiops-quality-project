@@ -24,9 +24,17 @@ spec:
           protocol: TCP
         env:
         {{- toYaml .Values.env | nindent 8 }}
+        envFrom:
+        - secretRef:
+            name: gh-actions
         livenessProbe:
           {{- toYaml .Values.livenessProbe | nindent 10 }}
         readinessProbe:
           {{- toYaml .Values.readinessProbe | nindent 10 }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
