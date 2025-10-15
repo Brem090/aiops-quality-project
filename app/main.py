@@ -1,15 +1,23 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pickle
-from pathlib import Path
 import numpy as np
 from prometheus_client import Counter, Histogram, generate_latest
 from fastapi.responses import Response
 import logging
+from pathlib import Path
 from datetime import datetime
 from typing import List
 import os
 import requests
+
+# Спроба завантажити Alibi Detect
+try:
+    from alibi_detect.cd import TabularDrift
+    _ALIBI_AVAILABLE = True
+except ImportError:
+    _ALIBI_AVAILABLE = False
+    TabularDrift = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,12 +34,19 @@ app = FastAPI(title="ML Inference Service")
 
 # Глобальні змінні
 model = None
-feature_stats = None
+drift_detector = None
+reference_data = []  # Для накопичення референсних даних
+feature_stats = None  # Fallback для Z-score
 
 # GitHub webhook
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "YOUR_USERNAME/aiops-quality-project")
 GITHUB_WORKFLOW = "ci-cd.yaml"
+
+# Конфігурація
+DRIFT_BACKEND = os.getenv("DRIFT_BACKEND", "tabular")  # tabular або zscore
+MIN_REFERENCE_SAMPLES = 100  # Мінімум зразків для ініціалізації детектора
+MAX_REFERENCE_SAMPLES = 500  # Максимум зразків для референсу
 
 class PredictionRequest(BaseModel):
     features: List[float]
@@ -43,7 +58,8 @@ class PredictionResponse(BaseModel):
     timestamp: str
 
 def load_model():
-    global model, feature_stats
+    """Завантаження моделі при старті"""
+    global model, feature_stats, drift_detector, reference_data
     
     base_dir = Path(__file__).resolve().parent
     default_path = base_dir / "models" / "model.pkl"
@@ -54,12 +70,20 @@ def load_model():
             model = pickle.load(f)
         logger.info(f"✓ Model loaded successfully from {model_path}")
         
-        # Ініціалізація статистики для drift detection
+        # Ініціалізація статистики для Z-score fallback
         feature_stats = {
             "mean": np.zeros(20),
             "std": np.ones(20),
             "count": 0
         }
+        
+        # Ініціалізація референсних даних
+        reference_data = []
+        drift_detector = None
+        
+        logger.info(f"Drift backend: {DRIFT_BACKEND}")
+        if not _ALIBI_AVAILABLE and DRIFT_BACKEND == "tabular":
+            logger.warning("⚠️  alibi-detect not available, falling back to Z-score")
         
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
@@ -99,8 +123,79 @@ def trigger_retrain_workflow():
         logger.error(f"✗ Error triggering workflow: {e}")
         return False
 
-def detect_drift(features: np.ndarray) -> bool:
-    """Z-score drift detection"""
+def initialize_drift_detector():
+    """Ініціалізація TabularDrift детектора"""
+    global drift_detector, reference_data
+    
+    if not _ALIBI_AVAILABLE or DRIFT_BACKEND != "tabular":
+        return False
+    
+    if len(reference_data) < MIN_REFERENCE_SAMPLES:
+        logger.info(f"Collecting reference data: {len(reference_data)}/{MIN_REFERENCE_SAMPLES}")
+        return False
+    
+    try:
+        # Конвертуємо в numpy array
+        X_ref = np.array(reference_data[:MAX_REFERENCE_SAMPLES])
+        
+        # Створюємо TabularDrift детектор
+        drift_detector = TabularDrift(
+            x_ref=X_ref,
+            p_val=0.05,  # Поріг p-value (5%)
+            categories_per_feature=None,  # Усі фічі числові
+            preprocess_at_init=True
+        )
+        
+        logger.info(f"✓ TabularDrift detector initialized with {X_ref.shape[0]} reference samples")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize TabularDrift: {e}")
+        return False
+
+def detect_drift_tabular(features: np.ndarray) -> bool:
+    """Перевірка дрейфу через TabularDrift"""
+    global drift_detector, reference_data
+    
+    # Якщо детектор не ініціалізований - збираємо дані
+    if drift_detector is None:
+        if len(reference_data) < MAX_REFERENCE_SAMPLES:
+            reference_data.append(features.tolist())
+        
+        # Спробуємо ініціалізувати детектор
+        if len(reference_data) >= MIN_REFERENCE_SAMPLES:
+            initialize_drift_detector()
+        
+        # Поки немає детектора - drift не виявляємо
+        return False
+    
+    try:
+        # Перевірка на drift
+        X_test = features.reshape(1, -1)
+        preds = drift_detector.predict(X_test, drift_type='batch')
+        
+        # Перевірка результату
+        is_drift = preds['data']['is_drift'] == 1
+        
+        if is_drift:
+            p_val = preds['data'].get('p_val', 0.0)
+            logger.warning(f"🚨 Drift detected by TabularDrift! p-value: {p_val:.6f}")
+            drift_counter.inc()
+            
+            # Тригер retrain кожні 5 drift детекцій
+            if int(drift_counter._value.get()) % 5 == 0:
+                logger.info("⚠️  Triggering retrain due to repeated drift...")
+                trigger_retrain_workflow()
+        
+        return is_drift
+        
+    except Exception as e:
+        logger.error(f"TabularDrift prediction failed: {e}, falling back to Z-score")
+        # При помилці переходимо на Z-score
+        return detect_drift_zscore(features)
+
+def detect_drift_zscore(features: np.ndarray) -> bool:
+    """Z-score drift detection (fallback)"""
     global feature_stats
     
     # Оновлюємо статистику
@@ -120,15 +215,21 @@ def detect_drift(features: np.ndarray) -> bool:
     drift_detected = np.any(z_scores > 3.0)
     
     if drift_detected:
-        logger.warning(f"🚨 Drift detected! Max Z-score: {np.max(z_scores):.2f}")
+        logger.warning(f"🚨 Drift detected (Z-score)! Max Z: {np.max(z_scores):.2f}")
         drift_counter.inc()
         
-        # Тригер retrain кожні 5 drift детекцій
         if int(drift_counter._value.get()) % 5 == 0:
             logger.info("⚠️  Triggering retrain due to repeated drift...")
             trigger_retrain_workflow()
     
     return drift_detected
+
+def detect_drift(features: np.ndarray) -> bool:
+    """Головна функція виявлення дрейфу"""
+    if DRIFT_BACKEND == "tabular" and _ALIBI_AVAILABLE:
+        return detect_drift_tabular(features)
+    else:
+        return detect_drift_zscore(features)
 
 def predict(features: List[float]) -> dict:
     """Основна функція передбачення"""
@@ -138,10 +239,12 @@ def predict(features: List[float]) -> dict:
         if X.shape[1] != 20:
             raise ValueError(f"Expected 20 features, got {X.shape[1]}")
         
+        # Передбачення (працює з усіма 4 типами моделей)
         prediction = model.predict(X)[0]
         probabilities = model.predict_proba(X)[0]
         max_prob = float(np.max(probabilities))
         
+        # Drift detection
         drift = detect_drift(X[0])
         
         return {
@@ -186,12 +289,34 @@ async def metrics():
 @app.get("/health")
 async def health():
     """Health check"""
-    return {"status": "healthy", "model_loaded": model is not None}
+    detector_status = "not_initialized" if drift_detector is None else "ready"
+    ref_samples = len(reference_data) if drift_detector is None else "N/A"
+    
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "drift_backend": DRIFT_BACKEND,
+        "drift_detector": detector_status,
+        "reference_samples": ref_samples
+    }
+
+@app.get("/drift-stats")
+async def drift_stats():
+    """Статистика drift детектора"""
+    return {
+        "backend": DRIFT_BACKEND,
+        "alibi_available": _ALIBI_AVAILABLE,
+        "detector_initialized": drift_detector is not None,
+        "reference_samples_collected": len(reference_data),
+        "min_samples_required": MIN_REFERENCE_SAMPLES,
+        "total_drift_detections": int(drift_counter._value.get())
+    }
 
 @app.get("/")
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "1.0.0",
-        "endpoints": ["/predict", "/metrics", "/health"]
+        "version": "2.0.0",
+        "drift_backend": DRIFT_BACKEND,
+        "endpoints": ["/predict", "/metrics", "/health", "/drift-stats"]
     }

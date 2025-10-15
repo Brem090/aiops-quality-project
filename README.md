@@ -222,6 +222,7 @@ helm install monitoring prometheus-community/kube-prometheus-stack `
   --namespace monitoring `
   --create-namespace `
   --wait `
+  --set grafana.enabled=false `
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false `
   --set nodeExporter.enabled=false
 
@@ -236,10 +237,26 @@ kubectl wait --for=condition=Ready pods --all -n monitoring --timeout=300s
 helm install loki grafana/loki-stack `
   --namespace monitoring `
   --wait `
-  --set grafana.enabled=false `
+  --set loki.enabled=true `
   --set promtail.enabled=true `
+  --set fluent-bit.enabled=false `
+  --set grafana.enabled=true `
   --set loki.persistence.enabled=true `
-  --set loki.persistence.size=2Gi
+  --set loki.persistence.size=1Gi `
+  --set loki.auth_enabled=false `
+
+  3. (Опційно) Під’єднати Prometheus до нової Grafana
+
+Відкрий Grafana → Connections → Data sources → Add data source
+
+Обери Prometheus
+
+У полі URL введи:
+
+http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+
+
+Натисни Save & test — має показати Data source is working.
 
 # Перевіряємо чи усе добре
 kubectl get pods -n monitoring
@@ -276,6 +293,9 @@ cd aiops-quality-project
 # Застосовуємо Application
 kubectl apply -f argocd/application.yaml -n argocd
 
+# Перевіряємо статус
+kubectl get application -n argocd ml-inference-service
+
 # Перевіряємо статус у ArgoCD UI
 # https://localhost:8080
 ```
@@ -303,13 +323,13 @@ kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service -f
 
 ## 🧪 Тестування
 
-### 1. Port-forward до сервісу
+### 1. Port-forward до сервісу (окреме вікно терміналу)
 
 ```bash
 kubectl port-forward -n ml-service svc/ml-inference-service 8000:8000
 ```
 
-### 2. Перевірка health endpoint (в іншому терміналі)
+### 2. Перевірка health endpoint (у новому вікні терміналу)
 
 ```bash
 curl http://localhost:8000/health
@@ -385,12 +405,12 @@ curl http://localhost:8000/metrics -UseBasicParsing | Select-Object -ExpandPrope
 # Отримуємо пароль admin
 [System.Text.Encoding]::UTF8.GetString(
     [System.Convert]::FromBase64String(
-        (kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}")
+        (kubectl get secret -n monitoring monitoring-grafana -o jsonpath="{.data.admin-password}")
     )
 )
 
-# Port-forward
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
+# Port-forward (окреме вікно)
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
 ```
 
 **Відкрийте**: http://localhost:3000
@@ -416,8 +436,8 @@ kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
 ### Prometheus Metrics
 
 ```bash
-# Port-forward до Prometheus
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090
+# Port-forward до Prometheus (окреме вікно)
+kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
 ```
 
 **Відкрийте**: http://localhost:9090
