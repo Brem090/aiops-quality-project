@@ -18,8 +18,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/ml-inference-service
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner,, }}/aiops-quality-project/ml-inference-service
+  IMAGE_NAME: aiops-quality-project/ml-inference-service
   DOCKER_TAG: ${{ github.sha }}
 
 jobs:
@@ -41,6 +40,7 @@ jobs:
       - name: Run tests
         run: |
           echo "Running tests..."
+          # Add pytest or unit tests here later if needed
 
   retrain-model:
     runs-on: ubuntu-latest
@@ -74,6 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, retrain-model]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/final-project'
+
     steps:
       - uses: actions/checkout@v4
 
@@ -87,23 +88,30 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      # --- FIX: lowercase owner and build image properly ---
       - name: Build Docker image
         run: |
-          docker build -f app/Dockerfile -t ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} .
-          docker tag ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} ${{ env.DOCKER_IMAGE }}:latest
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}"
+          TAG="${{ env.DOCKER_TAG }}"
+          echo "Building Docker image: $IMAGE:$TAG"
+          docker build -f app/Dockerfile -t "$IMAGE:$TAG" .
+          docker tag "$IMAGE:$TAG" "$IMAGE:latest"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
 
       - name: Push Docker image
         run: |
-          docker push ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
-          docker push ${{ env.DOCKER_IMAGE }}:latest
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
 
       - name: Update Helm chart image and tag
         run: |
-          sed -i "s|repository: .*|repository: ${{ env.DOCKER_IMAGE }}|" helm/values.yaml
-          sed -i "s/tag: .*/tag: \"${{ env.DOCKER_TAG }}\"/" helm/values.yaml
+          sed -i "s|repository: .*|repository: $IMAGE|" helm/values.yaml
+          sed -i "s/tag: .*/tag: \"$TAG\"/" helm/values.yaml
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add helm/values.yaml
-          git commit -m "Update image to ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}" || echo "No changes"
+          git commit -m "Update image to $IMAGE:$TAG" || echo "No changes"
           git push origin "${{ github.ref_name }}"
 
