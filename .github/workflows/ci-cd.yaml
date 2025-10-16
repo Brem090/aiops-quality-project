@@ -19,7 +19,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/ml-inference-service
-  DOCKER_IMAGE: ghcr.io/${{ github.repository }}/ml-inference-service
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner,, }}/aiops-quality-project/ml-inference-service
   DOCKER_TAG: ${{ github.sha }}
 
 jobs:
