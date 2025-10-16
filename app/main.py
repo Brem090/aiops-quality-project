@@ -31,9 +31,9 @@ logger = logging.getLogger("ml-inference")
 MODEL_PATH = os.getenv("MODEL_PATH")  # якщо не задано — візьмемо з /app/models/model.pkl
 DRIFT_BACKEND = os.getenv("DRIFT_BACKEND", "tabular")  # "tabular" або "zscore"
 FEATURES_N = int(os.getenv("FEATURES_N", "20"))
-MIN_REFERENCE_SAMPLES = int(os.getenv("MIN_REFERENCE_SAMPLES", "50"))
-MAX_REFERENCE_SAMPLES = int(os.getenv("MAX_REFERENCE_SAMPLES", "200"))
-ALIBI_P_VALUE = float(os.getenv("ALIBI_P_VALUE", "0.1"))  # чутливість тесту (0.05..0.2)
+MIN_REFERENCE_SAMPLES = int(os.getenv("MIN_REFERENCE_SAMPLES", "25"))
+MAX_REFERENCE_SAMPLES = int(os.getenv("MAX_REFERENCE_SAMPLES", "100"))
+ALIBI_P_VALUE = float(os.getenv("ALIBI_P_VALUE", "0.2"))  # чутливість тесту (0.05..0.2)
 
 # -------- Прометеус-метрики --------
 prediction_counter = Counter("predictions_total", "Total number of predictions")
@@ -314,7 +314,7 @@ async def reference_init():
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "3.0.0",
+        "version": "2.0.2",
         "drift_backend": DRIFT_BACKEND,
         "endpoints": ["/predict", "/metrics", "/health", "/drift-stats", "/reference/reset", "/reference/init"],
     }
