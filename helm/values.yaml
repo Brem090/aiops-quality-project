@@ -12,10 +12,10 @@ service:
 
 resources:
   limits:
-    cpu: 600m
-    memory: 768Mi
+    cpu: 800m
+    memory: 1024Mi
   requests:
-    cpu: 300m
+    cpu: 400m
     memory: 512Mi
 
 env:
