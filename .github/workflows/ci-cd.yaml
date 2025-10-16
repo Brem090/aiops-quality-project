@@ -18,7 +18,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: aiops-quality-project/ml-inference-service
+  IMAGE_NAME: ${{ github.event.repository.name }}   # пушимо в пакет, привʼязаний до цього репозиторію
   DOCKER_TAG: ${{ github.sha }}
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
       - name: Run tests
         run: |
           echo "Running tests..."
-          # Add pytest or unit tests here later if needed
+          #TODO: add pytest later
 
   retrain-model:
     runs-on: ubuntu-latest
@@ -85,22 +85,33 @@ jobs:
           name: trained-model
           path: models/
 
+      # Логін у GHCR GITHUB_TOKEN-ом
       - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Підготуємо контекст для твого Dockerfile (він очікує файли в корені)
       - name: Prepare Docker build context for legacy Dockerfile
         run: |
           cp app/requirements.txt requirements.txt
           cp app/main.py main.py
           ls -la
 
+      # Build (owner у lower-case) та проставляємо OCI label з посиланням на репозиторій
       - name: Build Docker image
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}"
           TAG="${{ env.DOCKER_TAG }}"
           echo "Building Docker image: $IMAGE:$TAG"
-          docker build -f app/Dockerfile -t "$IMAGE:$TAG" .
+
+          docker build -f app/Dockerfile \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            -t "$IMAGE:$TAG" .
+
           docker tag "$IMAGE:$TAG" "$IMAGE:latest"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
