@@ -12,11 +12,11 @@ service:
 
 resources:
   limits:
-    cpu: 300m
-    memory: 384Mi
+    cpu: 600m
+    memory: 768Mi
   requests:
-    cpu: 150m
-    memory: 192Mi
+    cpu: 300m
+    memory: 512Mi
 
 env:
   - name: MODEL_PATH
