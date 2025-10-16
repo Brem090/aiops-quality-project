@@ -88,7 +88,12 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      # --- FIX: lowercase owner and build image properly ---
+      - name: Prepare Docker build context for legacy Dockerfile
+        run: |
+          cp app/requirements.txt requirements.txt
+          cp app/main.py main.py
+          ls -la
+
       - name: Build Docker image
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')

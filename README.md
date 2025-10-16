@@ -492,7 +492,7 @@ Workflow файл: `.github/workflows/ci-cd.yaml`
 
 ```bash
 git add .
-git commit -m "[retrain] Trigger model retraining"
+git commit --allow-empty -m "[retrain] Trigger model retraining"
 git push origin final-project
 ```
 
