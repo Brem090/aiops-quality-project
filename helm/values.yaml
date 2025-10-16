@@ -24,7 +24,7 @@ env:
   - name: LOG_LEVEL
     value: "INFO"
   - name: DRIFT_BACKEND
-    value: "tabular"
+    value: "zscore"
 
 serviceMonitor:
   enabled: true
