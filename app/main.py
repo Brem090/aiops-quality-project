@@ -44,8 +44,8 @@ _drift_events = 0  # власний лічильник дрейфів
 
 # Конфігурація дрейфу
 DRIFT_BACKEND = os.getenv("DRIFT_BACKEND", "tabular")  # tabular або zscore
-MIN_REFERENCE_SAMPLES = 100
-MAX_REFERENCE_SAMPLES = 500
+MIN_REFERENCE_SAMPLES = 50
+MAX_REFERENCE_SAMPLES = 200
 
 class PredictionRequest(BaseModel):
     features: List[float]
