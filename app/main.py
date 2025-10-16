@@ -123,18 +123,20 @@ def initialize_drift_detector():
 def detect_drift_tabular(features: np.ndarray) -> bool:
     global drift_detector, _drift_events
 
-    # Збір референсу / lazy init
     with _state_lock:
         if drift_detector is None:
             if len(reference_data) < MAX_REFERENCE_SAMPLES:
                 reference_data.append(features.tolist())
             if len(reference_data) >= MIN_REFERENCE_SAMPLES:
-                initialize_drift_detector()
-            return False
+                ok = initialize_drift_detector()
+                if ok:
+                    logger.info("✓ TabularDrift activated — start monitoring drift")
+            else:
+                return False
 
     try:
         X_test = features.reshape(1, -1)
-        preds = drift_detector.predict(X_test)  # головне виправлення: без drift_type
+        preds = drift_detector.predict(X_test)
         is_drift = preds['data']['is_drift'] == 1
         if is_drift:
             logger.warning("🚨 Drift detected by TabularDrift! (no-auto-retrain)")
