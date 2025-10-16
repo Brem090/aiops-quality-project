@@ -9,7 +9,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import List
 import os
-import requests
 from threading import Lock, Thread
 
 # Спроба завантажити Alibi Detect
@@ -42,11 +41,6 @@ feature_stats = None       # fallback для Z-score
 # Конкурентні оновлення
 _state_lock = Lock()
 _drift_events = 0  # власний лічильник дрейфів
-
-# GitHub webhook (для retrain)
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "Brem090/aiops-quality-project")
-GITHUB_WORKFLOW = "ci-cd.yaml"
 
 # Конфігурація дрейфу
 DRIFT_BACKEND = os.getenv("DRIFT_BACKEND", "tabular")  # tabular або zscore
@@ -102,36 +96,6 @@ def load_model():
 async def startup_event():
     load_model()
 
-def trigger_retrain_workflow():
-    """Тригер GitHub Actions workflow для retrain"""
-    if not GITHUB_TOKEN:
-        logger.warning("GITHUB_TOKEN not set, skipping workflow trigger")
-        return False
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW}/dispatches"
-
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    data = {
-        "ref": "final-project",
-        "inputs": {"retrain": "true"},
-    }
-
-    try:
-        resp = requests.post(url, json=data, headers=headers, timeout=10)
-        if resp.status_code == 204:
-            logger.info("✓ GitHub Actions workflow triggered successfully")
-            return True
-        else:
-            logger.error(f"✗ Failed to trigger workflow: {resp.status_code} {resp.text}")
-            return False
-    except Exception as e:
-        logger.error(f"✗ Error triggering workflow: {e}")
-        return False
-
 def initialize_drift_detector():
     """Ініціалізація TabularDrift детектора"""
     global drift_detector
@@ -173,12 +137,10 @@ def detect_drift_tabular(features: np.ndarray) -> bool:
         preds = drift_detector.predict(X_test)  # головне виправлення: без drift_type
         is_drift = preds['data']['is_drift'] == 1
         if is_drift:
-            logger.warning("🚨 Drift detected by TabularDrift!")
+            logger.warning("🚨 Drift detected by TabularDrift! (no-auto-retrain)")
             with _state_lock:
                 _drift_events += 1
                 drift_counter.inc()
-                if _drift_events % 5 == 0:
-                    Thread(target=trigger_retrain_workflow, daemon=True).start()
         return is_drift
     except Exception as e:
         logger.error(f"TabularDrift prediction failed: {e}, falling back to Z-score")
@@ -201,12 +163,10 @@ def detect_drift_zscore(features: np.ndarray) -> bool:
         drift_detected = bool(np.any(z_scores > 3.0))
 
     if drift_detected:
-        logger.warning(f"🚨 Drift detected (Z-score)! Max Z: {float(np.max(z_scores)):.2f}")
+        logger.warning(f"🚨 Drift detected (Z-score)! Max Z: {float(np.max(z_scores)):.2f} (no-auto-retrain)")
         with _state_lock:
             _drift_events += 1
             drift_counter.inc()
-            if _drift_events % 5 == 0:
-                Thread(target=trigger_retrain_workflow, daemon=True).start()
 
     return drift_detected
 
@@ -294,7 +254,8 @@ async def drift_stats():
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "drift_backend": DRIFT_BACKEND,
         "endpoints": ["/predict", "/metrics", "/health", "/drift-stats"],
+        "retrain": "manual (commit [retrain] or workflow_dispatch)",
     }

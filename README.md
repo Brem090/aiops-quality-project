@@ -218,13 +218,17 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
 # Встановлюємо kube-prometheus-stack
-helm install monitoring prometheus-community/kube-prometheus-stack `
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack `
   --namespace monitoring `
   --create-namespace `
   --wait `
-  --set grafana.enabled=false `
+  --set grafana.enabled=true `
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false `
-  --set nodeExporter.enabled=false
+  --set nodeExporter.enabled=false `
+  --set grafana.additionalDataSources[0].name=Loki `
+  --set grafana.additionalDataSources[0].type=loki `
+  --set grafana.additionalDataSources[0].access=proxy `
+  --set grafana.additionalDataSources[0].url=http://loki.monitoring.svc.cluster.local:3100
 
 # Чекаємо на готовність
 kubectl wait --for=condition=Ready pods --all -n monitoring --timeout=300s
@@ -234,31 +238,28 @@ kubectl wait --for=condition=Ready pods --all -n monitoring --timeout=300s
 
 ```bash
 # Встановлюємо Loki Stack
-helm install loki grafana/loki-stack `
+helm upgrade --install loki grafana/loki-stack `
   --namespace monitoring `
   --wait `
   --set loki.enabled=true `
   --set promtail.enabled=true `
   --set fluent-bit.enabled=false `
-  --set grafana.enabled=true `
+  --set grafana.enabled=false `
   --set loki.persistence.enabled=true `
   --set loki.persistence.size=1Gi `
-  --set loki.auth_enabled=false `
+  --set loki.auth_enabled=false
 
-  3. Під’єднати Prometheus до Grafana (обов’язково для метрик дашборду)
+# Оновлення до новішої версії (у разі необхідності, коли версії Loki-контейнеру і Loki Helm-чарту не збігаються)
 
-Відкрий **Grafana → Connections → Data sources → Add data source**
+kubectl describe pod -n monitoring loki-0 | findstr "Image" # має бути більше 2.9, інакше може бути помилка під'єднання Loki в Grafana
 
-Обери **Prometheus**
-
-У полі **URL** введи:
-
-http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-
-
-Натисни Save & test — має показати Data source is working.
-ℹ️ Без цього підключення метрики у Grafana Dashboard залишаться порожніми,
-адже Grafana з Loki Stack за замовчуванням має лише джерело даних Loki.
+# якщо версія стара, потрібно використати цю команду
+helm upgrade loki grafana/loki-stack `
+  --namespace monitoring `
+  --reuse-values `
+  --set loki.image.tag=2.9.4 `
+  --set promtail.image.tag=2.9.4 `
+  --wait
 
 # Перевіряємо чи усе добре
 kubectl get pods -n monitoring

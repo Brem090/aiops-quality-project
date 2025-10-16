@@ -24,9 +24,6 @@ spec:
           protocol: TCP
         env:
         {{- toYaml .Values.env | nindent 8 }}
-        envFrom:
-        - secretRef:
-            name: gh-actions
         livenessProbe:
           {{- toYaml .Values.livenessProbe | nindent 10 }}
         readinessProbe:
