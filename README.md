@@ -408,12 +408,12 @@ curl http://localhost:8000/metrics -UseBasicParsing | Select-Object -ExpandPrope
 # Отримуємо пароль admin
 [System.Text.Encoding]::UTF8.GetString(
     [System.Convert]::FromBase64String(
-        (kubectl get secret -n monitoring loki-grafana -o jsonpath="{.data.admin-password}")
+        (kubectl get secret -n monitoring monitoring-grafana -o jsonpath="{.data.admin-password}")
     )
 )
 
 # Port-forward (окреме вікно)
-kubectl port-forward -n monitoring svc/loki-grafana 3000:80
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
 ```
 
 **Відкрийте**: http://localhost:3000
