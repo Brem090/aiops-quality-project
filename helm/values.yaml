@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: ml-inference-service
+  repository: ghcr.io/brem090/aiops-quality-project
   pullPolicy: IfNotPresent
-  tag: "latest"  
+  tag: "f169619debfe926cc5f7fa8577b3635feac0b5b9"
 
 service:
   type: ClusterIP
