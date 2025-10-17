@@ -144,49 +144,43 @@ def _ensure_ge_initialized():
 
 # ---------------- GE-валідація (м'яка перевірка якості) ----------------
 def _validate_with_ge(features: np.ndarray) -> bool:
-    """
-    Повертає True, якщо GE-валідація пройдена або вимкнена.
-    Використовує офіційний шлях: DataContext + pandas-datasource + dataframe_asset + Validator.
-    """
+    """Перевірка якості даних через Great Expectations без data_context."""
     if not (_GE_AVAILABLE and GE_ENABLE):
         return True
-
-    if not _ensure_ge_initialized():
-        # Якщо з будь-якої причини ініціалізація не вдалася — fail-open
-        return True
-
     try:
+        import pandas as pd
+        from great_expectations.execution_engine import PandasExecutionEngine
+        from great_expectations.validator.validator import Validator
+        from great_expectations.core.expectation_configuration import ExpectationConfiguration
+
         cols = [f"f{i}" for i in range(features.shape[0])]
         df = pd.DataFrame([features], columns=cols)
 
-        # Створюємо batch_request для поточного DataFrame
-        batch_request = _ge_asset.build_batch_request(dataframe=df)
-
-        # Беремо валідатор без постійного suite (одноразова валідація)
-        validator = _ge_ctx.get_validator(batch_request=batch_request)
+        engine = PandasExecutionEngine()
+        validator = Validator(execution_engine=engine)
+        validator.execution_engine.load_batch_data("inference_batch", df)
 
         # Базові очікування
         validator.expect_table_row_count_to_equal(1)
         for c in cols:
             validator.expect_column_values_to_not_be_null(c)
 
-        # Динамічні межі навколо онлайн-статистик, якщо вже є накопичення
+        # Межі за Z-score, якщо вже є статистика
         with _state_lock:
             fs = feature_stats
-            have_stats = fs is not None and fs["count"] >= 5
-            if have_stats:
-                mean = fs["mean"].copy()
-                std = fs["std"].copy()
-
-        if have_stats:
-            low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
-            high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
-            for i, c in enumerate(cols):
-                validator.expect_column_values_to_be_between(c, min_value=low[i], max_value=high[i], mostly=1.0)
+            if fs and fs["count"] >= 5:
+                mean, std = fs["mean"], fs["std"]
+                low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
+                high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
+                for i, c in enumerate(cols):
+                    cfg = ExpectationConfiguration(
+                        expectation_type="expect_column_values_to_be_between",
+                        kwargs={"column": c, "min_value": low[i], "max_value": high[i], "mostly": 1.0},
+                    )
+                    validator.append_expectation(cfg)
 
         result = validator.validate()
         return bool(result.success)
-
     except Exception as e:
         logger.error(f"GE validation error (ignored): {e}")
         return True
