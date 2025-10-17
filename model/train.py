@@ -30,7 +30,7 @@ def train_model():
         n_redundant=8,
         n_clusters_per_class=3,
         class_sep=0.8,   
-        flip_y=0.15,      
+        flip_y=0.1,      
         random_state=42
     )
 

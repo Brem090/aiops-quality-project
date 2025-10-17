@@ -21,13 +21,16 @@ logging.basicConfig(
 logger = logging.getLogger("ml-inference")
 
 # ---------------- Опційний шар якості даних (Great Expectations) ----------------
+# Ми одразу вкажемо GX_HOME у /tmp, аби контекст створювався в тимчасовій теці контейнера
+os.environ.setdefault("GX_HOME", "/tmp/gx")
+
 try:
     import pandas as pd
-    import great_expectations as ge
+    import great_expectations as gx
     _GE_AVAILABLE = True
 except Exception:
     _GE_AVAILABLE = False
-    ge = None
+    gx = None
     pd = None
 
 # ---------------- Конфіг через змінні оточення ----------------
@@ -49,6 +52,11 @@ model = None
 feature_stats = None  # онлайн-оцінки середнього/розкиду для Z-score
 _state_lock = Lock()
 _drift_events = 0
+
+# GE lazy-singletons
+_ge_ctx = None         # gx.DataContext
+_ge_asset = None       # dataframe asset
+_ge_lock = Lock()      # щоб не ініціалізувати в паралельних потоках
 
 # ---------------- Моделі запиту/відповіді ----------------
 class PredictionRequest(BaseModel):
@@ -92,43 +100,89 @@ def load_model() -> None:
 async def startup_event():
     load_model()
 
+# ---------------- Ініціалізація GE (новий API 0.18+) ----------------
+def _ensure_ge_initialized():
+    """
+    Ледача ініціалізація GE-контексту та pandas-datasource/asset.
+    Працює з great_expectations >= 0.18 без ручного Batch/Validator-конструювання.
+    """
+    global _ge_ctx, _ge_asset
+    if not (_GE_AVAILABLE and GE_ENABLE):
+        return False
+
+    if _ge_ctx is not None and _ge_asset is not None:
+        return True
+
+    with _ge_lock:
+        if _ge_ctx is not None and _ge_asset is not None:
+            return True
+
+        try:
+            # Контекст (файловий) створиться під GX_HOME (/tmp/gx)
+            _ge_ctx = gx.get_context()
+            # Додаємо (або повторно отримуємо) pandas-джерело
+            ds_name = "inference_pandas"
+            try:
+                datasource = _ge_ctx.datasources[ds_name]
+            except Exception:
+                datasource = _ge_ctx.sources.add_pandas(name=ds_name)
+
+            # Додаємо (або повторно отримуємо) asset для DataFrame
+            asset_name = "inference_dataframe_asset"
+            try:
+                _ge_asset = datasource.get_asset(asset_name)  # може не існувати у деяких версіях
+            except Exception:
+                _ge_asset = datasource.add_dataframe_asset(name=asset_name)
+
+            logger.info("GE: контекст і datasource/asset готові")
+            return True
+        except Exception as e:
+            logger.error(f"GE init error (ignored): {e}")
+            _ge_ctx = None
+            _ge_asset = None
+            return False
+
 # ---------------- GE-валідація (м'яка перевірка якості) ----------------
 def _validate_with_ge(features: np.ndarray) -> bool:
-    """Повертає True, якщо GE-валідація пройдена або вимкнена."""
+    """
+    Повертає True, якщо GE-валідація пройдена або вимкнена.
+    Використовує офіційний шлях: DataContext + pandas-datasource + dataframe_asset + Validator.
+    """
     if not (_GE_AVAILABLE and GE_ENABLE):
         return True
-    try:
-        import great_expectations as gx
-        import pandas as pd
-        from great_expectations.validator.validator import Validator
-        from great_expectations.execution_engine import PandasExecutionEngine
 
+    if not _ensure_ge_initialized():
+        # Якщо з будь-якої причини ініціалізація не вдалася — fail-open
+        return True
+
+    try:
         cols = [f"f{i}" for i in range(features.shape[0])]
         df = pd.DataFrame([features], columns=cols)
 
-        # Створюємо Validator із PandasExecutionEngine (новий API)
-        validator = Validator(execution_engine=PandasExecutionEngine())
+        # Створюємо batch_request для поточного DataFrame
+        batch_request = _ge_asset.build_batch_request(dataframe=df)
 
-        # Додаємо батч вручну
-        validator.execution_engine.load_batch_data("tmp_batch", df)
+        # Беремо валідатор без постійного suite (одноразова валідація)
+        validator = _ge_ctx.get_validator(batch_request=batch_request)
 
-        # Очікування
+        # Базові очікування
         validator.expect_table_row_count_to_equal(1)
         for c in cols:
             validator.expect_column_values_to_not_be_null(c)
 
-        # Межі значень на основі статистики
+        # Динамічні межі навколо онлайн-статистик, якщо вже є накопичення
         with _state_lock:
             fs = feature_stats
             have_stats = fs is not None and fs["count"] >= 5
             if have_stats:
-                mean, std = fs["mean"], fs["std"]
+                mean = fs["mean"].copy()
+                std = fs["std"].copy()
 
         if have_stats:
             low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
             high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
             for i, c in enumerate(cols):
-                validator.expect_column_values_to_be_between(c, low[i], high[i], mostly=1.0)
+                validator.expect_column_values_to_be_between(c, min_value=low[i], max_value=high[i], mostly=1.0)
 
         result = validator.validate()
         return bool(result.success)
@@ -238,7 +292,7 @@ async def health():
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "2.1.0",
-        "description": "Сервіс інференсу з детекцією дрейфу за Z-score та опційною GE-валідацією.",
+        "version": "2.2.0",
+        "description": "Сервіс інференсу з детекцією дрейфу за Z-score та GE-валідацією (GX 0.18+).",
         "endpoints": ["/predict", "/metrics", "/health"],
     }

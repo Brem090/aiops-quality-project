@@ -4,7 +4,7 @@ pydantic==2.5.0
 scikit-learn==1.7.2
 numpy==2.1.1
 scipy==1.13.1
+great_expectations==1.7.1
+pandas==2.2.2
 prometheus-client==0.19.0
 requests==2.31.0
-great_expectations>=0.18.8
-pandas>=1.5
