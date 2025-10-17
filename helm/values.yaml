@@ -12,19 +12,23 @@ service:
 
 resources:
   limits:
-    cpu: 800m
-    memory: 1024Mi
-  requests:
     cpu: 400m
-    memory: 512Mi
+    memory: 500Mi
+  requests:
+    cpu: 250m
+    memory: 300Mi
 
 env:
   - name: MODEL_PATH
     value: "/app/models/model.pkl"
   - name: LOG_LEVEL
     value: "INFO"
-  - name: DRIFT_BACKEND
-    value: "zscore"
+  - name: GE_ENABLE
+    value: "true"
+  - name: ZSCORE_THRESHOLD 
+    value: "3.0"
+  - name: FEATURES_N 
+    value: "20"
 
 serviceMonitor:
   enabled: true

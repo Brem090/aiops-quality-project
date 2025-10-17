@@ -18,7 +18,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.event.repository.name }}   # пушимо в пакет, привʼязаний до цього репозиторію
+  IMAGE_NAME: ${{ github.event.repository.name }}  
   DOCKER_TAG: ${{ github.sha }}
 
 jobs:
@@ -40,7 +40,6 @@ jobs:
       - name: Run tests
         run: |
           echo "Running tests..."
-          #TODO: add pytest later
 
   retrain-model:
     runs-on: ubuntu-latest

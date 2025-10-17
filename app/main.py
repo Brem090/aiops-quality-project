@@ -10,49 +10,47 @@ import os
 from pathlib import Path
 from datetime import datetime
 from typing import List
-from threading import Lock, Thread
+from threading import Lock
 
-# -------- Опційний бекенд дрейфу (alibi-detect) --------
-try:
-    from alibi_detect.cd import TabularDrift
-    _ALIBI_AVAILABLE = True
-except ImportError:
-    _ALIBI_AVAILABLE = False
-    TabularDrift = None
-
-# -------- Логування --------
+# ---------------- Налаштування логування ----------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("ml-inference")
 
-# -------- Конфіг --------
-MODEL_PATH = os.getenv("MODEL_PATH")  # якщо не задано — візьмемо з /app/models/model.pkl
-DRIFT_BACKEND = os.getenv("DRIFT_BACKEND", "tabular")  # "tabular" або "zscore"
+# ---------------- Опційний шар якості даних (Great Expectations) ----------------
+try:
+    import pandas as pd
+    import great_expectations as ge
+    _GE_AVAILABLE = True
+except Exception:
+    _GE_AVAILABLE = False
+    ge = None
+    pd = None
+
+# ---------------- Конфіг через змінні оточення ----------------
+MODEL_PATH = os.getenv("MODEL_PATH")  # якщо не задано — /app/models/model.pkl
 FEATURES_N = int(os.getenv("FEATURES_N", "20"))
-MIN_REFERENCE_SAMPLES = int(os.getenv("MIN_REFERENCE_SAMPLES", "25"))
-MAX_REFERENCE_SAMPLES = int(os.getenv("MAX_REFERENCE_SAMPLES", "100"))
-ALIBI_P_VALUE = float(os.getenv("ALIBI_P_VALUE", "0.2"))  # чутливість тесту (0.05..0.2)
+ZSCORE_THRESHOLD = float(os.getenv("ZSCORE_THRESHOLD", "3.0"))
+GE_ENABLE = os.getenv("GE_ENABLE", "true").lower() == "true"
 
-# -------- Прометеус-метрики --------
-prediction_counter = Counter("predictions_total", "Total number of predictions")
-prediction_latency = Histogram("prediction_latency_seconds", "Prediction latency")
-drift_counter = Counter("drift_detected_total", "Total number of drift detections")
+# ---------------- Прометеус-метрики ----------------
+prediction_counter = Counter("predictions_total", "Загальна кількість передбачень")
+prediction_latency = Histogram("prediction_latency_seconds", "Латентність передбачень, с")
+drift_counter = Counter("drift_detected_total", "Загальна кількість детекцій дрейфу")
 
-# -------- App --------
+# ---------------- Ініціалізація застосунку ----------------
 app = FastAPI(title="ML Inference Service")
 
-# -------- Глобальний стан --------
+# ---------------- Глобальний стан ----------------
 model = None
-reference_data: list = []          # буфер для X_ref
-drift_detector = None              # об'єкт TabularDrift або None
-feature_stats = None               # для Z-score fallback
+feature_stats = None  # онлайн-оцінки середнього/розкиду для Z-score
 _state_lock = Lock()
-_init_in_progress = False
-_drift_events = 0                  # власний лічильник детекцій
+_drift_events = 0
 
-# -------- Pydantic --------
+# ---------------- Моделі запиту/відповіді ----------------
 class PredictionRequest(BaseModel):
     features: List[float]
 
@@ -62,9 +60,10 @@ class PredictionResponse(BaseModel):
     drift_detected: bool
     timestamp: str
 
-# -------- Завантаження моделі --------
-def load_model():
-    global model, feature_stats, drift_detector, reference_data, _init_in_progress
+# ---------------- Завантаження моделі ----------------
+def load_model() -> None:
+    """Завантажити модель з диска та скинути статистики ознак."""
+    global model, feature_stats
 
     base_dir = Path(__file__).resolve().parent
     default_model_path = base_dir / "models" / "model.pkl"
@@ -73,174 +72,130 @@ def load_model():
     try:
         with open(model_path, "rb") as f:
             model = pickle.load(f)
-        logger.info(f"✅ Model loaded from: {model_path}")
+        logger.info(f"Модель завантажено з: {model_path}")
 
         with _state_lock:
-            reference_data.clear()
             feature_stats = {
-                "mean": np.zeros(FEATURES_N),
-                "std": np.ones(FEATURES_N),
+                "mean": np.zeros(FEATURES_N, dtype=np.float32),
+                "std": np.ones(FEATURES_N, dtype=np.float32),
                 "count": 0,
             }
-            # Скидаємо детектор і прапор ініціалізації
-            global drift_detector
-            drift_detector = None
-            global _init_in_progress
-            _init_in_progress = False
 
-        if DRIFT_BACKEND == "tabular" and not _ALIBI_AVAILABLE:
-            logger.warning("⚠️ alibi-detect is not installed. Falling back to Z-score backend.")
-        logger.info(f"🧭 Drift backend: {DRIFT_BACKEND} | FEATURES_N={FEATURES_N}")
-
+        logger.info(
+            f"Увімкнено дрейф за Z-score | FEATURES_N={FEATURES_N} | поріг_z={ZSCORE_THRESHOLD}"
+        )
     except Exception as e:
-        logger.error(f"❌ Failed to load model: {e}")
+        logger.error(f"Не вдалося завантажити модель: {e}")
         raise
 
 @app.on_event("startup")
 async def startup_event():
     load_model()
 
-# -------- Ініціалізація TabularDrift (синхронна) --------
-def initialize_drift_detector() -> bool:
-    """Ініціалізує TabularDrift з reference_data. Викликається у фоні."""
-    global drift_detector
-    if not _ALIBI_AVAILABLE or DRIFT_BACKEND != "tabular":
-        return False
-
-    with _state_lock:
-        if len(reference_data) < MIN_REFERENCE_SAMPLES:
-            logger.info(
-                f"Collecting reference data: {len(reference_data)}/{MIN_REFERENCE_SAMPLES}"
-            )
-            return False
-
-        try:
-            X_ref = np.array(reference_data[:MAX_REFERENCE_SAMPLES], dtype=np.float32)
-        except Exception as e:
-            logger.error(f"Cannot convert reference_data to array: {e}")
-            return False
-
-    try:
-        dd = TabularDrift(
-            x_ref=X_ref,
-            p_val=ALIBI_P_VALUE,
-            categories_per_feature=None,
-            preprocess_at_init=True,
-        )
-        with _state_lock:
-            drift_detector = dd
-        logger.info(f"✅ TabularDrift initialized with {X_ref.shape[0]} ref samples (p_val={ALIBI_P_VALUE})")
+# ---------------- GE-валідація (м'яка перевірка якості) ----------------
+def _validate_with_ge(features: np.ndarray) -> bool:
+    """
+    Повертає True, якщо перевірку GE пройдено або GE вимкнено/недоступний.
+    У разі помилки валідації або бібліотеки — пишемо в лог та пропускаємо (fail-open).
+    """
+    if not (_GE_AVAILABLE and GE_ENABLE):
         return True
-    except Exception as e:
-        logger.error(f"Failed to initialize TabularDrift: {e}")
-        return False
-
-# -------- Фоновий воркер ініціалізації --------
-def _init_worker():
-    global _init_in_progress
     try:
-        ok = initialize_drift_detector()
-        if ok:
-            logger.info("🎯 TabularDrift is ready")
-        else:
-            logger.error("❌ TabularDrift background init failed")
-    finally:
-        with _state_lock:
-            _init_in_progress = False
+        cols = [f"f{i}" for i in range(features.shape[0])]
+        df = pd.DataFrame([features], columns=cols)
+        gdf = ge.from_pandas(df)
 
-# -------- Детекція дрейфу: Z-score fallback --------
-def detect_drift_zscore(features: np.ndarray) -> bool:
+        # Базові очікування
+        gdf.expect_table_row_count_to_equal(1)
+        for c in cols:
+            gdf.expect_column_values_to_not_be_null(c)
+
+        # Динамічні межі навколо онлайн-статистик, якщо вже є накопичення
+        with _state_lock:
+            fs = feature_stats
+            have_stats = fs is not None and fs["count"] >= 5
+            if have_stats:
+                mean = fs["mean"].copy()
+                std = fs["std"].copy()
+
+        if have_stats:
+            low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
+            high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
+            for i, c in enumerate(cols):
+                gdf.expect_column_values_to_be_between(c, low[i], high[i], mostly=1.0)
+
+        result = gdf.validate()
+        return bool(result.success)
+    except Exception as e:
+        logger.error(f"Помилка GE-перевірки (проігноровано): {e}")
+        return True
+
+# ---------------- Детекція дрейфу: Z-score (+ опційний GE) ----------------
+def detect_drift(features: np.ndarray) -> bool:
+    """
+    Онлайн-оновлення статистик ознак та перевірка на дрейф за Z-score.
+    Додатково застосовується м'яка GE-перевірка якості.
+    """
     global feature_stats, _drift_events
 
     with _state_lock:
         if feature_stats["count"] == 0:
-            feature_stats["mean"] = features.copy()
-            feature_stats["std"] = np.ones_like(features)
+            feature_stats["mean"] = features.astype(np.float32).copy()
+            feature_stats["std"] = np.ones_like(features, dtype=np.float32)
         else:
-            alpha = 0.1
-            feature_stats["mean"] = (1 - alpha) * feature_stats["mean"] + alpha * features
-            feature_stats["std"] = (1 - alpha) * feature_stats["std"] + alpha * np.abs(features - feature_stats["mean"])
+            alpha = 0.1  # швидкість згладжування
+            feature_stats["mean"] = (
+                (1 - alpha) * feature_stats["mean"] + alpha * features
+            )
+            feature_stats["std"] = (
+                (1 - alpha) * feature_stats["std"]
+                + alpha * np.abs(features - feature_stats["mean"])
+            )
         feature_stats["count"] += 1
 
         z_scores = np.abs((features - feature_stats["mean"]) / (feature_stats["std"] + 1e-6))
-        drift_detected = bool(np.any(z_scores > 3.0))
+        zscore_drift = bool(np.any(z_scores > ZSCORE_THRESHOLD))
+
+    ge_ok = _validate_with_ge(features)
+    drift_detected = zscore_drift or (not ge_ok)
 
     if drift_detected:
         with _state_lock:
             _drift_events += 1
         drift_counter.inc()
-        logger.warning(f"🚨 Drift detected (Z-score)! max_z={float(np.max(z_scores)):.2f}")
+        logger.warning(
+            f"Виявлено дрейф: max_z={float(np.max(z_scores)):.2f}, поріг_z={ZSCORE_THRESHOLD}, ge_ok={ge_ok}"
+        )
 
     return drift_detected
 
-# -------- Детекція дрейфу: TabularDrift --------
-def detect_drift_tabular(features: np.ndarray) -> bool:
-    global drift_detector, _drift_events, _init_in_progress
-
-    with _state_lock:
-        # Буферизуємо reference, поки детектор не готовий
-        if drift_detector is None:
-            if len(reference_data) < MAX_REFERENCE_SAMPLES:
-                reference_data.append(features.tolist())
-
-            # Досягли мінімуму — стартуємо одноразову фонову ініціалізацію
-            if len(reference_data) >= MIN_REFERENCE_SAMPLES and not _init_in_progress:
-                _init_in_progress = True
-                Thread(target=_init_worker, daemon=True).start()
-
-            # Поки ініт не завершено — не детектимо дрейф
-            return False
-
-    # Детектор готовий — перевіряємо дрейф
-    try:
-        X_test = features.reshape(1, -1).astype(np.float32)
-        preds = drift_detector.predict(X_test)
-        is_drift = bool(preds["data"]["is_drift"] == 1)
-        if is_drift:
-            with _state_lock:
-                _drift_events += 1
-            drift_counter.inc()
-            logger.warning("🚨 Drift detected by TabularDrift!")
-        return is_drift
-    except Exception as e:
-        logger.error(f"TabularDrift prediction failed: {e}, falling back to Z-score")
-        return detect_drift_zscore(features)
-
-# -------- Роутерний вибір бекенду --------
-def detect_drift(features: np.ndarray) -> bool:
-    if DRIFT_BACKEND == "tabular" and _ALIBI_AVAILABLE:
-        return detect_drift_tabular(features)
-    return detect_drift_zscore(features)
-
-# -------- Інференс --------
+# ---------------- Передбачення ----------------
 def _predict_impl(features: List[float]) -> dict:
     X = np.array(features, dtype=np.float32).reshape(1, -1)
     if X.shape[1] != FEATURES_N:
-        raise ValueError(f"Expected {FEATURES_N} features, got {X.shape[1]}")
+        raise ValueError(f"Очікується {FEATURES_N} ознак, отримано {X.shape[1]}")
 
     # Класифікація
     if hasattr(model, "predict_proba"):
         proba = float(model.predict_proba(X)[0][1])
         y_pred = int(proba > 0.5)
     else:
-        # Fallback (без імовірності)
         y_pred = int(model.predict(X)[0])
         proba = 1.0
 
     drift = detect_drift(X[0])
     return {"prediction": y_pred, "probability": proba, "drift_detected": drift}
 
-# -------- Endpoints --------
+# ---------------- Маршрути ----------------
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):
-    logger.info(f"Request: {len(request.features)} features")
-
+    logger.info(f"Отримано запит: {len(request.features)} ознак")
     with prediction_latency.time():
         try:
             result = _predict_impl(request.features)
             prediction_counter.inc()
         except Exception as e:
-            logger.error(f"Prediction error: {e}")
+            logger.error(f"Помилка під час передбачення: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     resp = PredictionResponse(
@@ -249,7 +204,9 @@ async def predict(request: PredictionRequest):
         drift_detected=result["drift_detected"],
         timestamp=datetime.now().isoformat(),
     )
-    logger.info(f"Response: pred={resp.prediction}, prob={resp.probability:.3f}, drift={resp.drift_detected}")
+    logger.info(
+        f"Відповідь: клас={resp.prediction}, ймовірність={resp.probability:.3f}, дрейф={resp.drift_detected}"
+    )
     return resp
 
 @app.get("/metrics")
@@ -259,62 +216,22 @@ async def metrics():
 @app.get("/health")
 async def health():
     with _state_lock:
-        detector_status = "ready" if drift_detector is not None else "not_initialized"
-        ref_samples = len(reference_data) if drift_detector is None else "bound_to_detector"
-        init_flag = _init_in_progress
+        stats = None if feature_stats is None else {"count": feature_stats["count"]}
     return {
-        "status": "healthy",
-        "model_loaded": model is not None,
-        "drift_backend": DRIFT_BACKEND,
-        "drift_detector": detector_status,
-        "init_in_progress": init_flag,
-        "reference_samples": ref_samples,
+        "status": "працює",
+        "model_loaded": bool(model is not None),
         "features_n": FEATURES_N,
+        "zscore_threshold": ZSCORE_THRESHOLD,
+        "ge_enabled": bool(_GE_AVAILABLE and GE_ENABLE),
+        "drift_events": _drift_events,
+        "feature_stats": stats,
     }
-
-@app.get("/drift-stats")
-async def drift_stats():
-    with _state_lock:
-        ref_count = len(reference_data)
-        init_flag = _init_in_progress
-        detector_ready = drift_detector is not None
-        drift_events = _drift_events
-    return {
-        "backend": DRIFT_BACKEND,
-        "alibi_available": _ALIBI_AVAILABLE,
-        "detector_initialized": detector_ready,
-        "init_in_progress": init_flag,
-        "reference_samples_collected": ref_count,
-        "min_samples_required": MIN_REFERENCE_SAMPLES,
-        "x_ref_ready": min(ref_count, MAX_REFERENCE_SAMPLES) if not detector_ready else "bound to detector",
-        "total_drift_detections": drift_events,
-    }
-
-@app.post("/reference/reset")
-async def reference_reset():
-    global drift_detector, _init_in_progress, _drift_events
-    with _state_lock:
-        reference_data.clear()
-        drift_detector = None
-        _init_in_progress = False
-        _drift_events = 0
-    return {"ok": True, "message": "reference buffer cleared"}
-
-@app.post("/reference/init")
-async def reference_init():
-    """Форс-ініт з наявного буфера (для тестів/стендів)."""
-    if not _ALIBI_AVAILABLE or DRIFT_BACKEND != "tabular":
-        return {"ok": False, "reason": "tabular/alibi not active"}
-    if len(reference_data) < max(5, MIN_REFERENCE_SAMPLES // 2):
-        return {"ok": False, "reason": "not enough samples in buffer"}
-    ok = initialize_drift_detector()
-    return {"ok": bool(ok), "detector_initialized": drift_detector is not None}
 
 @app.get("/")
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "2.0.2",
-        "drift_backend": DRIFT_BACKEND,
-        "endpoints": ["/predict", "/metrics", "/health", "/drift-stats", "/reference/reset", "/reference/init"],
+        "version": "2.1.0",
+        "description": "Сервіс інференсу з детекцією дрейфу за Z-score та опційною GE-валідацією.",
+        "endpoints": ["/predict", "/metrics", "/health"],
     }

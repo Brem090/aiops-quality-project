@@ -491,8 +491,7 @@ Workflow файл: `.github/workflows/ci-cd.yaml`
 #### Метод 2: Через коміт
 
 ```bash
-git add .
-git commit --allow-empty -m "[retrain] Trigger model retraining"
+git commit --allow-empty -m "[retrain] Test retrain"
 git push origin final-project
 ```
 
