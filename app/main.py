@@ -96,21 +96,35 @@ async def startup_event():
 def _validate_with_ge(features: np.ndarray) -> bool:
     """
     Повертає True, якщо перевірку GE пройдено або GE вимкнено/недоступний.
-    У разі помилки валідації або бібліотеки — пишемо в лог та пропускаємо (fail-open).
+    Підтримує як старий, так і новий синтаксис Great Expectations.
     """
     if not (_GE_AVAILABLE and GE_ENABLE):
         return True
+
     try:
         cols = [f"f{i}" for i in range(features.shape[0])]
         df = pd.DataFrame([features], columns=cols)
-        gdf = ge.from_pandas(df)
 
-        # Базові очікування
+        # --- ✅ Сумісність зі старими і новими версіями GE ---
+        try:
+            # Старий синтаксис (до v0.17)
+            gdf = ge.from_pandas(df)
+        except AttributeError:
+            # Новий синтаксис (v0.17+)
+            import great_expectations.validator.validator as gxv
+            import great_expectations.execution_engine as gxe
+
+            gdf = gxv.Validator(
+                execution_engine=gxe.PandasExecutionEngine(),
+                batches=[{"data": df}]
+            )
+
+        # --- Базові очікування ---
         gdf.expect_table_row_count_to_equal(1)
         for c in cols:
             gdf.expect_column_values_to_not_be_null(c)
 
-        # Динамічні межі навколо онлайн-статистик, якщо вже є накопичення
+        # --- Динамічні межі mean±k*std ---
         with _state_lock:
             fs = feature_stats
             have_stats = fs is not None and fs["count"] >= 5
@@ -126,6 +140,7 @@ def _validate_with_ge(features: np.ndarray) -> bool:
 
         result = gdf.validate()
         return bool(result.success)
+
     except Exception as e:
         logger.error(f"Помилка GE-перевірки (проігноровано): {e}")
         return True

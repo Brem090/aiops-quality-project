@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/brem090/aiops-quality-project
   pullPolicy: IfNotPresent
-  tag: "fix-versions"
+  tag: "fix-ge"
 
 service:
   type: ClusterIP
@@ -48,3 +48,4 @@ readinessProbe:
     port: 8000
   initialDelaySeconds: 5
   periodSeconds: 5
+  
