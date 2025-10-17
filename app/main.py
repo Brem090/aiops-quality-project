@@ -94,55 +94,47 @@ async def startup_event():
 
 # ---------------- GE-валідація (м'яка перевірка якості) ----------------
 def _validate_with_ge(features: np.ndarray) -> bool:
-    """
-    Повертає True, якщо перевірку GE пройдено або GE вимкнено/недоступний.
-    Підтримує як старий, так і новий синтаксис Great Expectations.
-    """
+    """Повертає True, якщо GE-валідація пройдена або вимкнена."""
     if not (_GE_AVAILABLE and GE_ENABLE):
         return True
-
     try:
+        import great_expectations as gx
+        import pandas as pd
+        from great_expectations.validator.validator import Validator
+        from great_expectations.execution_engine import PandasExecutionEngine
+
         cols = [f"f{i}" for i in range(features.shape[0])]
         df = pd.DataFrame([features], columns=cols)
 
-        # --- ✅ Сумісність зі старими і новими версіями GE ---
-        try:
-            # Старий синтаксис (до v0.17)
-            gdf = ge.from_pandas(df)
-        except AttributeError:
-            # Новий синтаксис (v0.17+)
-            import great_expectations.validator.validator as gxv
-            import great_expectations.execution_engine as gxe
+        # Створюємо Validator із PandasExecutionEngine (новий API)
+        validator = Validator(execution_engine=PandasExecutionEngine())
 
-            gdf = gxv.Validator(
-                execution_engine=gxe.PandasExecutionEngine(),
-                batches=[{"data": df}]
-            )
+        # Додаємо батч вручну
+        validator.execution_engine.load_batch_data("tmp_batch", df)
 
-        # --- Базові очікування ---
-        gdf.expect_table_row_count_to_equal(1)
+        # Очікування
+        validator.expect_table_row_count_to_equal(1)
         for c in cols:
-            gdf.expect_column_values_to_not_be_null(c)
+            validator.expect_column_values_to_not_be_null(c)
 
-        # --- Динамічні межі mean±k*std ---
+        # Межі значень на основі статистики
         with _state_lock:
             fs = feature_stats
             have_stats = fs is not None and fs["count"] >= 5
             if have_stats:
-                mean = fs["mean"].copy()
-                std = fs["std"].copy()
+                mean, std = fs["mean"], fs["std"]
 
         if have_stats:
             low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
             high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
             for i, c in enumerate(cols):
-                gdf.expect_column_values_to_be_between(c, low[i], high[i], mostly=1.0)
+                validator.expect_column_values_to_be_between(c, low[i], high[i], mostly=1.0)
 
-        result = gdf.validate()
+        result = validator.validate()
         return bool(result.success)
 
     except Exception as e:
-        logger.error(f"Помилка GE-перевірки (проігноровано): {e}")
+        logger.error(f"GE validation error (ignored): {e}")
         return True
 
 # ---------------- Детекція дрейфу: Z-score (+ опційний GE) ----------------
