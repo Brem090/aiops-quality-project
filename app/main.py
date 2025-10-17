@@ -144,42 +144,43 @@ def _ensure_ge_initialized():
 
 # ---------------- GE-валідація (м'яка перевірка якості) ----------------
 def _validate_with_ge(features: np.ndarray) -> bool:
-    """Перевірка якості даних через Great Expectations без data_context."""
+    """Перевірка якості даних через GX 1.x API (DataContext-free)."""
     if not (_GE_AVAILABLE and GE_ENABLE):
         return True
     try:
         import pandas as pd
-        from great_expectations.execution_engine import PandasExecutionEngine
+        import great_expectations as gx
         from great_expectations.validator.validator import Validator
-        from great_expectations.core.expectation_configuration import ExpectationConfiguration
+        from great_expectations.execution_engine import PandasExecutionEngine
 
         cols = [f"f{i}" for i in range(features.shape[0])]
         df = pd.DataFrame([features], columns=cols)
 
+        # Використовуємо новий API: PandasExecutionEngine + Validator
         engine = PandasExecutionEngine()
         validator = Validator(execution_engine=engine)
         validator.execution_engine.load_batch_data("inference_batch", df)
 
-        # Базові очікування
+        # Очікування
         validator.expect_table_row_count_to_equal(1)
         for c in cols:
             validator.expect_column_values_to_not_be_null(c)
 
-        # Межі за Z-score, якщо вже є статистика
+        # Динамічні межі (Z-score)
         with _state_lock:
             fs = feature_stats
-            if fs and fs["count"] >= 5:
+            have_stats = fs and fs["count"] >= 5
+            if have_stats:
                 mean, std = fs["mean"], fs["std"]
                 low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
                 high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
                 for i, c in enumerate(cols):
-                    cfg = ExpectationConfiguration(
-                        expectation_type="expect_column_values_to_be_between",
-                        kwargs={"column": c, "min_value": low[i], "max_value": high[i], "mostly": 1.0},
+                    validator.expect_column_values_to_be_between(
+                        c, low[i], high[i], mostly=1.0
                     )
-                    validator.append_expectation(cfg)
 
-        result = validator.validate()
+        # Новий метод перевірки в GX 1.x
+        result = validator.validate(expectation_suite=None)
         return bool(result.success)
     except Exception as e:
         logger.error(f"GE validation error (ignored): {e}")
