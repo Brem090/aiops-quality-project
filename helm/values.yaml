@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/brem090/aiops-quality-project
   pullPolicy: IfNotPresent
-  tag: "fix-ge5"
+  tag: "fix-ge6"
 
 service:
   type: ClusterIP
@@ -21,14 +21,14 @@ resources:
 env:
   - name: MODEL_PATH
     value: "/app/models/model.pkl"
+  - name: FEATURES_N
+    value: "20"
+  - name: ZSCORE_THRESHOLD
+    value: "3.0"
+  - name: PROBA_THRESHOLD
+    value: "0.5"
   - name: LOG_LEVEL
     value: "INFO"
-  - name: GE_ENABLE
-    value: "true"
-  - name: ZSCORE_THRESHOLD 
-    value: "3.0"
-  - name: FEATURES_N 
-    value: "20"
 
 serviceMonitor:
   enabled: true

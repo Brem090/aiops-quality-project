@@ -20,24 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ml-inference")
 
-# ---------------- Опційний шар якості даних (Great Expectations) ----------------
-# Ми одразу вкажемо GX_HOME у /tmp, аби контекст створювався в тимчасовій теці контейнера
-os.environ.setdefault("GX_HOME", "/tmp/gx")
-
-try:
-    import pandas as pd
-    import great_expectations as gx
-    _GE_AVAILABLE = True
-except Exception:
-    _GE_AVAILABLE = False
-    gx = None
-    pd = None
-
 # ---------------- Конфіг через змінні оточення ----------------
 MODEL_PATH = os.getenv("MODEL_PATH")  # якщо не задано — /app/models/model.pkl
 FEATURES_N = int(os.getenv("FEATURES_N", "20"))
 ZSCORE_THRESHOLD = float(os.getenv("ZSCORE_THRESHOLD", "3.0"))
-GE_ENABLE = os.getenv("GE_ENABLE", "true").lower() == "true"
+PROBA_THRESHOLD = float(os.getenv("PROBA_THRESHOLD", "0.5"))
 
 # ---------------- Прометеус-метрики ----------------
 prediction_counter = Counter("predictions_total", "Загальна кількість передбачень")
@@ -52,11 +39,6 @@ model = None
 feature_stats = None  # онлайн-оцінки середнього/розкиду для Z-score
 _state_lock = Lock()
 _drift_events = 0
-
-# GE lazy-singletons
-_ge_ctx = None         # gx.DataContext
-_ge_asset = None       # dataframe asset
-_ge_lock = Lock()      # щоб не ініціалізувати в паралельних потоках
 
 # ---------------- Моделі запиту/відповіді ----------------
 class PredictionRequest(BaseModel):
@@ -100,144 +82,56 @@ def load_model() -> None:
 async def startup_event():
     load_model()
 
-# ---------------- Ініціалізація GE (новий API 0.18+) ----------------
-def _ensure_ge_initialized():
-    """
-    Ледача ініціалізація GE-контексту та pandas-datasource/asset.
-    Працює з great_expectations >= 0.18 без ручного Batch/Validator-конструювання.
-    """
-    global _ge_ctx, _ge_asset
-    if not (_GE_AVAILABLE and GE_ENABLE):
-        return False
+# ---------------- Внутрішні перевірки вхідних даних ----------------
+def _quick_sanity(x: np.ndarray) -> None:
+    """Кидає помилку, якщо дані невалідні."""
+    if x.ndim != 2 or x.shape[1] != FEATURES_N:
+        raise ValueError(f"Очікується {FEATURES_N} ознак, отримано {x.shape[1] if x.ndim == 2 else 'не 2D'}")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("Вхідні ознаки містять NaN/Inf.")
 
-    if _ge_ctx is not None and _ge_asset is not None:
-        return True
-
-    with _ge_lock:
-        if _ge_ctx is not None and _ge_asset is not None:
-            return True
-
-        try:
-            # Контекст (файловий) створиться під GX_HOME (/tmp/gx)
-            _ge_ctx = gx.get_context()
-            # Додаємо (або повторно отримуємо) pandas-джерело
-            ds_name = "inference_pandas"
-            try:
-                datasource = _ge_ctx.datasources[ds_name]
-            except Exception:
-                datasource = _ge_ctx.sources.add_pandas(name=ds_name)
-
-            # Додаємо (або повторно отримуємо) asset для DataFrame
-            asset_name = "inference_dataframe_asset"
-            try:
-                _ge_asset = datasource.get_asset(asset_name)  # може не існувати у деяких версіях
-            except Exception:
-                _ge_asset = datasource.add_dataframe_asset(name=asset_name)
-
-            logger.info("GE: контекст і datasource/asset готові")
-            return True
-        except Exception as e:
-            logger.error(f"GE init error (ignored): {e}")
-            _ge_ctx = None
-            _ge_asset = None
-            return False
-
-# ---------------- GE-валідація (м'яка перевірка якості) ----------------
-def _validate_with_ge(features: np.ndarray) -> bool:
-    """Перевірка якості даних через GX 1.x API (DataContext-free)."""
-    if not (_GE_AVAILABLE and GE_ENABLE):
-        return True
-    try:
-        import pandas as pd
-        import great_expectations as gx
-        from great_expectations.validator.validator import Validator
-        from great_expectations.execution_engine import PandasExecutionEngine
-
-        cols = [f"f{i}" for i in range(features.shape[0])]
-        df = pd.DataFrame([features], columns=cols)
-
-        # Використовуємо новий API: PandasExecutionEngine + Validator
-        engine = PandasExecutionEngine()
-        validator = Validator(execution_engine=engine)
-        validator.execution_engine.load_batch_data("inference_batch", df)
-
-        # Очікування
-        validator.expect_table_row_count_to_equal(1)
-        for c in cols:
-            validator.expect_column_values_to_not_be_null(c)
-
-        # Динамічні межі (Z-score)
-        with _state_lock:
-            fs = feature_stats
-            have_stats = fs and fs["count"] >= 5
-            if have_stats:
-                mean, std = fs["mean"], fs["std"]
-                low = (mean - ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
-                high = (mean + ZSCORE_THRESHOLD * (std + 1e-6)).tolist()
-                for i, c in enumerate(cols):
-                    validator.expect_column_values_to_be_between(
-                        c, low[i], high[i], mostly=1.0
-                    )
-
-        # Новий метод перевірки в GX 1.x
-        result = validator.validate(expectation_suite=None)
-        return bool(result.success)
-    except Exception as e:
-        logger.error(f"GE validation error (ignored): {e}")
-        return True
-
-# ---------------- Детекція дрейфу: Z-score (+ опційний GE) ----------------
+# ---------------- Детекція дрейфу: Z-score ----------------
 def detect_drift(features: np.ndarray) -> bool:
     """
     Онлайн-оновлення статистик ознак та перевірка на дрейф за Z-score.
-    Додатково застосовується м'яка GE-перевірка якості.
+    Статистики оновлюються експоненційним згладжуванням (EMA).
     """
     global feature_stats, _drift_events
 
     with _state_lock:
+        # ініціалізація
         if feature_stats["count"] == 0:
             feature_stats["mean"] = features.astype(np.float32).copy()
             feature_stats["std"] = np.ones_like(features, dtype=np.float32)
         else:
             alpha = 0.1  # швидкість згладжування
-            feature_stats["mean"] = (
-                (1 - alpha) * feature_stats["mean"] + alpha * features
-            )
-            feature_stats["std"] = (
-                (1 - alpha) * feature_stats["std"]
-                + alpha * np.abs(features - feature_stats["mean"])
-            )
-        feature_stats["count"] += 1
+            feature_stats["mean"] = (1 - alpha) * feature_stats["mean"] + alpha * features
+            feature_stats["std"] = (1 - alpha) * feature_stats["std"] + alpha * np.abs(features - feature_stats["mean"])
 
+        feature_stats["count"] += 1
         z_scores = np.abs((features - feature_stats["mean"]) / (feature_stats["std"] + 1e-6))
         zscore_drift = bool(np.any(z_scores > ZSCORE_THRESHOLD))
 
-    ge_ok = _validate_with_ge(features)
-    drift_detected = zscore_drift or (not ge_ok)
-
-    if drift_detected:
+    if zscore_drift:
         with _state_lock:
             _drift_events += 1
         drift_counter.inc()
-        logger.warning(
-            f"Виявлено дрейф: max_z={float(np.max(z_scores)):.2f}, поріг_z={ZSCORE_THRESHOLD}, ge_ok={ge_ok}"
-        )
+        logger.warning(f"Виявлено дрейф: max_z={float(np.max(z_scores)):.2f}, поріг_z={ZSCORE_THRESHOLD}")
 
-    return drift_detected
+    return zscore_drift
 
 # ---------------- Передбачення ----------------
 def _predict_impl(features: List[float]) -> dict:
     X = np.array(features, dtype=np.float32).reshape(1, -1)
-    if X.shape[1] != FEATURES_N:
-        raise ValueError(f"Очікується {FEATURES_N} ознак, отримано {X.shape[1]}")
+    _quick_sanity(X)
 
     # Класифікація
     if hasattr(model, "predict_proba"):
         proba = float(model.predict_proba(X)[0][1])
-        y_pred = int(proba > 0.5)
+        y_pred = int(proba > PROBA_THRESHOLD)
     else:
         y_pred = int(model.predict(X)[0])
-        proba = 1.0
+        proba = 1.0  # якщо моделі немає predict_proba
 
     drift = detect_drift(X[0])
     return {"prediction": y_pred, "probability": proba, "drift_detected": drift}
@@ -278,7 +172,7 @@ async def health():
         "model_loaded": bool(model is not None),
         "features_n": FEATURES_N,
         "zscore_threshold": ZSCORE_THRESHOLD,
-        "ge_enabled": bool(_GE_AVAILABLE and GE_ENABLE),
+        "proba_threshold": PROBA_THRESHOLD,
         "drift_events": _drift_events,
         "feature_stats": stats,
     }
@@ -287,7 +181,8 @@ async def health():
 async def root():
     return {
         "service": "ML Inference API",
-        "version": "2.2.0",
-        "description": "Сервіс інференсу з детекцією дрейфу за Z-score та GE-валідацією (GX 0.18+).",
+        "version": "2.4.0",
+        "description": "Сервіс інференсу з детекцією дрейфу за Z-score (EMA + 3σ).",
         "endpoints": ["/predict", "/metrics", "/health"],
     }
+
