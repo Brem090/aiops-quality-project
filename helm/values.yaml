@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/brem090/aiops-quality-project
   pullPolicy: IfNotPresent
-  tag: "f1d14bbaa467f6dfdf2bfa8b7a0b66b4ff06fe2d"
+  tag: "051173622394e2e6929d2f270bf762d157501621"
 
 service:
   type: ClusterIP
