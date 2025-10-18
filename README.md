@@ -461,8 +461,8 @@ rate(drift_detected_total[5m])
 
 У Grafana:
 1. **Explore → Loki**
-2. Запит: `{namespace="ml-service"}`
-3. Фільтр для drift: `{namespace="ml-service"} |= "Drift detected"`
+2. Запит: `{namespace="monitoring}`
+3. Фільтр для drift: `{namespace="monitoring"} |= "Drift detected"`
 
 ---
 
