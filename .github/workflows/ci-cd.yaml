@@ -84,7 +84,6 @@ jobs:
           name: trained-model
           path: models/
 
-      # Логін у GHCR GITHUB_TOKEN-ом
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -92,14 +91,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Підготуємо контекст для твого Dockerfile (він очікує файли в корені)
       - name: Prepare Docker build context for legacy Dockerfile
         run: |
           cp app/requirements.txt requirements.txt
           cp app/main.py main.py
           ls -la
 
-      # Build (owner у lower-case) та проставляємо OCI label з посиланням на репозиторій
       - name: Build Docker image
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')

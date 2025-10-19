@@ -20,8 +20,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ml-inference")
 
-# ---------------- Конфіг через змінні оточення ----------------
-MODEL_PATH = os.getenv("MODEL_PATH")  # якщо не задано — /app/models/model.pkl
+# ---------------- Конфігурація через змінні оточення ----------------
+MODEL_PATH = os.getenv("MODEL_PATH")  
 FEATURES_N = int(os.getenv("FEATURES_N", "20"))
 ZSCORE_THRESHOLD = float(os.getenv("ZSCORE_THRESHOLD", "3.0"))
 PROBA_THRESHOLD = float(os.getenv("PROBA_THRESHOLD", "0.5"))
@@ -36,7 +36,7 @@ app = FastAPI(title="ML Inference Service")
 
 # ---------------- Глобальний стан ----------------
 model = None
-feature_stats = None  # онлайн-оцінки середнього/розкиду для Z-score
+feature_stats = None  
 _state_lock = Lock()
 _drift_events = 0
 
@@ -92,10 +92,7 @@ def _quick_sanity(x: np.ndarray) -> None:
 
 # ---------------- Детекція дрейфу: Z-score ----------------
 def detect_drift(features: np.ndarray) -> bool:
-    """
-    Онлайн-оновлення статистик ознак та перевірка на дрейф за Z-score.
-    Статистики оновлюються експоненційним згладжуванням (EMA).
-    """
+
     global feature_stats, _drift_events
 
     with _state_lock:
@@ -104,7 +101,7 @@ def detect_drift(features: np.ndarray) -> bool:
             feature_stats["mean"] = features.astype(np.float32).copy()
             feature_stats["std"] = np.ones_like(features, dtype=np.float32)
         else:
-            alpha = 0.1  # швидкість згладжування
+            alpha = 0.1  
             feature_stats["mean"] = (1 - alpha) * feature_stats["mean"] + alpha * features
             feature_stats["std"] = (1 - alpha) * feature_stats["std"] + alpha * np.abs(features - feature_stats["mean"])
 
@@ -131,7 +128,7 @@ def _predict_impl(features: List[float]) -> dict:
         y_pred = int(proba > PROBA_THRESHOLD)
     else:
         y_pred = int(model.predict(X)[0])
-        proba = 1.0  # якщо моделі немає predict_proba
+        proba = 1.0 
 
     drift = detect_drift(X[0])
     return {"prediction": y_pred, "probability": proba, "drift_detected": drift}

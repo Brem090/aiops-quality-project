@@ -1,103 +1,63 @@
 # AIOps Quality Project
 
-![Python](https://img.shields.io/badge/Python-3.11-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
-![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28-blue)
-![ArgoCD](https://img.shields.io/badge/ArgoCD-2.9-orange)
+Фінальний проєкт курсу з розробки MLOps системи для inference моделі машинного навчання з автоматичним виявленням дрейфу даних.
 
-MLOps система для inference ML моделі з автоматичним виявленням дрейфу даних, моніторингом та GitOps деплоєм.
+## Про проєкт
+
+Цей проєкт демонструє повний цикл розробки production-ready ML сервісу: від тренування моделі до автоматизованого деплою через GitOps. Система автоматично виявляє відхилення у вхідних даних (drift detection) і може перезапускати тренування моделі через CI/CD pipeline.
 
 ## Зміст
 
-- [Архітектура системи](#архітектура-системи)
-- [Компоненти](#компоненти)
-- [Передумови](#передумови)
-- [Інсталяція](#інсталяція)
-- [Запуск проєкту](#запуск-проєкту)
-- [Тестування](#тестування)
+- [Як влаштована система](#як-влаштована-система)
+- [Що потрібно для запуску](#що-потрібно-для-запуску)
+- [Встановлення](#встановлення)
+- [Запуск](#запуск)
+- [Як тестувати](#як-тестувати)
 - [Моніторинг](#моніторинг)
-- [CI/CD Pipeline](#cicd-pipeline)
-- [Troubleshooting](#troubleshooting)
+- [Оновлення моделі](#оновлення-моделі)
+- [Скріншоти](#скріншоти)
+- [Проблеми та рішення](#проблеми-та-рішення)
 
 ---
 
-##  Архітектура системи
+## Як влаштована система
+
+Проєкт складається з декількох компонентів які працюють разом:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        GitHub Repository                      │
-│  ┌────────────────┐         ┌──────────────────┐            │
-│  │  Source Code   │         │  GitHub Actions  │            │
-│  │  + Helm Charts │────────▶│  CI/CD Pipeline  │            │
-│  └────────────────┘         └──────────────────┘            │
-└──────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                         │
-│                                                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │                    ArgoCD                            │    │
-│  │  (GitOps Continuous Deployment)                     │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                          │                                    │
-│                          ▼                                    │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │         ML Inference Service (FastAPI)              │    │
-│  │  ┌──────────────┐  ┌───────────────────────────┐   │    │
-│  │  │   Model      │  │   Drift Detector          │   │    │
-│  │  │  (.pkl file) │  │  (Statistical Analysis)   │   │    │
-│  │  └──────────────┘  └───────────────────────────┘   │    │
-│  │           │                    │                     │    │
-│  │           ▼                    ▼                     │    │
-│  │     /predict              Triggers retrain          │    │
-│  └─────────────────────────────────────────────────────┘    │
-│             │                       │                        │
-│             ▼                       ▼                        │
-│  ┌──────────────────┐    ┌─────────────────────┐           │
-│  │   Prometheus     │    │   Loki + Promtail   │           │
-│  │   (Metrics)      │    │   (Logs)            │           │
-│  └──────────────────┘    └─────────────────────┘           │
-│             │                       │                        │
-│             └───────────┬───────────┘                        │
-│                         ▼                                    │
-│              ┌─────────────────────┐                         │
-│              │      Grafana        │                         │
-│              │  (Visualization)    │                         │
-│              └─────────────────────┘                         │
-└──────────────────────────────────────────────────────────────┘
+GitHub (вихідний код)
+    ↓
+GitHub Actions (автоматичне тестування та білд)
+    ↓
+Docker образ (контейнер з моделлю)
+    ↓
+ArgoCD (автоматичний деплой у Kubernetes)
+    ↓
+FastAPI сервіс (приймає запити та робить передбачення)
+    ↓
+Prometheus + Grafana (збирають метрики та показують графіки)
+Loki + Promtail (збирають та зберігають логи)
 ```
 
-### Потік даних
+---
 
-1. **Inference Request**: Користувач відправляє запит на `/predict`
-2. **Prediction**: ML модель робить передбачення
-3. **Drift Detection**: Аналіз даних на наявність дрейфу
-4. **Logging**: Логування запиту та відповіді (Loki)
-5. **Metrics**: Експорт метрик (Prometheus)
-6. **Alert**: При виявленні дрейфу → тригер GitHub Actions
-7. **Retrain**: GitHub Actions перетренує модель
-8. **Redeploy**: ArgoCD автоматично деплоїть нову версію
+### Основні компоненти
+
+**FastAPI сервіс** - приймає JSON запити з 20 числовими ознаками, робить передбачення за допомогою натренованої моделі (RandomForest, GradientBoosting, LogisticRegression або NeuralNetwork) і повертає результат разом з ймовірністю.
+
+**Drift Detector** - аналізує кожен запит за допомогою Z-score статистики. Якщо дані сильно відрізняються від "нормальних" (більше ніж на 3 стандартні відхилення), система логує це як drift і може автоматично запустити перетренування моделі.
+
+**Prometheus** - збирає метрики: скільки запитів прийшло, як швидко відповідає API, скільки разів виявлено drift.
+
+**Grafana** - показує всі ці метрики у вигляді красивих графіків у реальному часі.
+
+**Loki** - зберігає всі логи з сервісу, щоб можна було подивитись що відбувалось у минулому.
+
+**ArgoCD** - слідкує за GitHub репозиторієм і автоматично оновлює сервіс у Kubernetes коли ви робите commit.
 
 ---
 
-## Компоненти
-
-| Компонент | Опис | Технологія |
-|-----------|------|------------|
-| **Inference Service** | FastAPI сервіс для ML передбачень | FastAPI, scikit-learn |
-| **Drift Detector** | Статистичний аналіз дрейфу даних | NumPy, Custom Z-score |
-| **Model Training** | Скрипт для тренування моделі | scikit-learn, RandomForest |
-| **Helm Chart** | Kubernetes деплоймент конфігурація | Helm 3 |
-| **ArgoCD** | GitOps continuous deployment | ArgoCD |
-| **Prometheus** | Збір метрик та моніторинг | Prometheus, ServiceMonitor |
-| **Grafana** | Візуалізація метрик та логів | Grafana Dashboards |
-| **Loki + Promtail** | Централізоване логування | Grafana Loki |
-| **GitHub Actions** | CI/CD pipeline для retrain | GitHub Workflows |
-
----
-
-## Передумови
+## Що потрібно для запуску
 
 ### Програмне забезпечення
 
@@ -124,9 +84,11 @@ python --version
 # Очікуваний результат: Python 3.11.x
 ```
 
+Якщо всі команди працюють - можна починати.
+
 ---
 
-## Інсталяція
+## Встановлення
 
 ### Крок 1: Клонування репозиторію
 
@@ -267,15 +229,15 @@ kubectl get pods -n monitoring
 
 ---
 
-## 🚀 Запуск проєкту
+## Запуск
+
+### Метод 1: Через Helm
 
 ```bash
+
 # Створюємо namespace для сервісу
 kubectl create namespace ml-service
-```
-### Метод 1: Через Helm (мануальний деплой)
 
-```bash
 # Встановлюємо через Helm
 helm install ml-service ./helm --namespace ml-service
 
@@ -324,7 +286,7 @@ kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service -f
 
 ---
 
-## 🧪 Тестування
+## Як тестувати
 
 ### 1. Port-forward до сервісу (окреме вікно терміналу)
 
@@ -398,7 +360,7 @@ curl http://localhost:8000/metrics -UseBasicParsing | Select-Object -ExpandPrope
 
 ---
 
-## 📊 Моніторинг
+## Моніторинг
 
 ### Grafana Dashboard
 
@@ -466,7 +428,7 @@ rate(drift_detected_total[5m])
 
 ---
 
-## 🔄 CI/CD Pipeline
+## CI/CD Pipeline
 
 ### GitHub Actions Workflow
 
@@ -503,26 +465,26 @@ git push origin final-project
 ```
 
 Pipeline виконає:
-1. ✅ Тести (test job)
-2. 🔄 Retrain моделі (retrain-model job)
-3. 🐳 Білд Docker образу (build-and-push job)
-4. 📝 Оновлення Helm values.yaml
-5. 🚀 ArgoCD автоматично підхопить зміни та задеплоїть
+1. Тести (test job)
+2. Retrain моделі (retrain-model job)
+3. Білд Docker образу (build-and-push job)
+4. Оновлення Helm values.yaml
+5. ArgoCD автоматично підхопить зміни та задеплоїть
 
 ---
 
-## 🔍 Перевірка функціональності
+## Перевірка функціональності
 
 ### Чеклист перевірки
 
-#### 1. API працює ✅
+#### 1. API
 
 ```bash
 kubectl port-forward -n ml-service svc/ml-service-ml-inference-service 8000:8000
 curl http://localhost:8000/health
 ```
 
-#### 2. Передбачення працюють ✅
+#### 2. Передбачення
 
 ```bash
 curl -X POST http://localhost:8000/predict \
@@ -530,7 +492,7 @@ curl -X POST http://localhost:8000/predict \
   -d '{"features": [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0]}'
 ```
 
-#### 3. Drift detection спрацьовує ✅
+#### 3. Drift detection
 
 ```bash
 # Запускаємо тест
@@ -540,14 +502,14 @@ python tests/test_drift.py
 kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service | grep "Drift detected"
 ```
 
-#### 4. Логи збираються ✅
+#### 4. Логи
 
 ```bash
 # В Grafana Explore
-{namespace="ml-service"}
+{namespace="monitoring"}
 ```
 
-#### 5. Метрики експортуються ✅
+#### 5. Метрики
 
 ```bash
 # Prometheus targets
@@ -555,14 +517,14 @@ kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service | grep
 # Шукайте: ml-inference-service
 ```
 
-#### 6. Grafana Dashboard працює ✅
+#### 6. Grafana Dashboard
 
 ```bash
 # Відкрийте dashboard "ML Inference Service Dashboard"
 # Перевірте що панелі показують дані
 ```
 
-#### 7. ArgoCD sync працює ✅
+#### 7. ArgoCD sync
 
 ```bash
 # В ArgoCD UI
@@ -571,7 +533,7 @@ kubectl logs -n ml-service -l app.kubernetes.io/name=ml-inference-service | grep
 # Status: Synced, Healthy
 ```
 
-#### 8. GitHub Actions pipeline ✅
+#### 8. GitHub Actions pipeline 
 
 ```bash
 # Тригеруємо workflow
@@ -677,8 +639,8 @@ aiops-quality-project/
 │       └── _helpers.tpl     # Helm helpers
 ├── argocd/
 │   └── application.yaml     # ArgoCD Application
-├── prometheus/
-│   └── servicemonitor.yaml  # Prometheus ServiceMonitor
+├── scripts/
+│   └── quick-test.sh        # Швидкий тест ML Inference Servicer
 ├── grafana/
 │   └── dashboard.json       # Grafana Dashboard
 ├── tests/
@@ -721,51 +683,3 @@ git add helm/values.yaml
 git commit -m "Update model to v2"
 git push origin final-project
 ```
-
-5. **ArgoCD автоматично задеплоїть**
-
----
-
-## 📊 Критерії оцінювання
-
-| Компонент | Бали | Статус |
-|-----------|------|--------|
-| FastAPI сервіс з predict() | 15 | ✅ |
-| Helm Chart | 10 | ✅ |
-| ArgoCD з auto-sync | 10 | ✅ |
-| Логування + Loki | 10 | ✅ |
-| Моніторинг + Grafana | 10 | ✅ |
-| Drift Detector | 15 | ✅ |
-| GitHub Actions retrain | 20 | ✅ |
-| README.md | 10 | ✅ |
-| **Загалом** | **100** | **✅** |
-
----
-
-## 📞 Контакти та посилання
-
-- **GitHub Repository**: https://github.com/YOUR_USERNAME/aiops-quality-project
-- **ArgoCD UI**: https://localhost:8080
-- **Grafana UI**: http://localhost:3000
-- **Prometheus UI**: http://localhost:9090
-
----
-
-## 📝 Ліцензія
-
-MIT License
-
----
-
-## 🙏 Подяки
-
-- FastAPI за чудовий фреймворк
-- Prometheus Community за Helm charts
-- ArgoCD за GitOps платформу
-- Grafana Labs за інструменти моніторингу
-
----
-
-**Проєкт виконав**: Прізвище Ім'я  
-**Дата**: 12.10.2025  
-**Гілка**: final-project

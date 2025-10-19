@@ -93,7 +93,6 @@ def main():
     print(f"# ML Inference Service - Drift Detection Test")
     print(f"{'#'*60}\n")
 
-    # Перевірка доступності API
     try:
         response = requests.get(f"{API_URL}/health", timeout=TIMEOUT)
         response.raise_for_status()
